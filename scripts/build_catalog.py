@@ -37,7 +37,7 @@ def require_text(data, key, source):
 
 def require_https(value, field, source):
     parsed = urlparse(value)
-    if parsed.scheme != "https" or not parsed.netloc:
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or any(character.isspace() for character in value):
         raise ValueError(f"{source}: {field} must be an HTTPS URL")
     return value
 
@@ -52,7 +52,10 @@ def request(url, accept="application/vnd.github+json", use_token=False):
         headers["X-GitHub-Api-Version"] = "2022-11-28"
     try:
         with urlopen(Request(url, headers=headers), timeout=30) as response:
-            return response.read()
+            data = response.read(16 * 1024 * 1024 + 1)
+            if len(data) > 16 * 1024 * 1024:
+                raise ValueError(f"Metadata exceeds 16 MiB: {url}")
+            return data
     except HTTPError as error:
         if error.code == 404:
             raise ResourceNotFound(url) from error
@@ -111,6 +114,24 @@ def normalize_minecraft_versions(value, source):
     return [item.strip() for item in value]
 
 
+def normalize_summary(info, source):
+    summary = info.get("summary")
+    if summary is None:
+        text = " ".join(require_text(info, "description", source).split())
+        return text if len(text) <= 240 else text[:237].rsplit(" ", 1)[0] + "…"
+    if not isinstance(summary, str) or not summary.strip() or len(summary.strip()) > 240:
+        raise ValueError(f"{source}: summary must contain 1 to 240 characters")
+    return summary.strip()
+
+
+def normalize_changelog(value, source):
+    if value is None:
+        return ""
+    if not isinstance(value, str) or len(value) > 16000:
+        raise ValueError(f"{source}: changelog must be text up to 16000 characters")
+    return value.strip()
+
+
 def direct_extension(name):
     return Path(name).suffix.lower()
 
@@ -123,6 +144,7 @@ def direct_asset_name(url):
 def load_static_mod(data, source):
     for key in ("id", "name", "author", "description"):
         data[key] = require_text(data, key, source)
+    data["summary"] = normalize_summary(data, source)
 
     icon_url = data.get("icon_url")
     local_icon = source.parent / "icon.png"
@@ -183,6 +205,7 @@ def load_static_mod(data, source):
             "minecraft_versions": minecraft_versions,
             "download_type": download_type,
             "published_at": published_at,
+            "changelog": normalize_changelog(release.get("changelog"), source),
         }
 
         if download_type == "direct":
@@ -445,6 +468,7 @@ def mod_info_from_manifest(
         "name": name,
         "author": author,
         "description": description,
+        "summary": normalize_summary(info, source),
         "homepage_url": homepage_url,
         "tags": normalize_tags(
             info.get("tags", []), source
@@ -634,6 +658,8 @@ def load_github_mod(registration, source):
             "download_type": "direct",
             "assets": assets,
             "published_at": published_at.strip(),
+            "changelog": normalize_changelog(manifest.get("changelog", release.get("body", "")), manifest_source),
+            "source_url": require_https(release.get("html_url", f"https://github.com/{repository}/releases"), "source_url", manifest_source),
         }
         catalog_releases.append(release_entry)
 
@@ -704,6 +730,7 @@ def mod_info_from_url_manifest(
         "description": require_text(
             info, "description", metadata_url
         ),
+        "summary": normalize_summary(info, metadata_url),
         "tags": normalize_tags(
             info.get("tags", []), metadata_url
         ),
@@ -745,29 +772,11 @@ def mod_info_from_url_manifest(
     return result
 
 
-def load_url_mod(
+def load_url_release(
     registration,
     source,
-    previous_mod,
+    metadata_url,
 ):
-    metadata_url = require_https(
-        require_text(
-            registration, "metadata_url", source
-        ),
-        "metadata_url",
-        source,
-    )
-
-    max_releases = registration.get("max_releases", 20)
-    if (
-        not isinstance(max_releases, int)
-        or max_releases < 1
-        or max_releases > 100
-    ):
-        raise ValueError(
-            f"{source}: max_releases must be between 1 and 100"
-        )
-
     manifest = load_url_manifest(metadata_url)
 
     version = require_text(
@@ -807,7 +816,13 @@ def load_url_mod(
         "minecraft_versions": minecraft_versions,
         "download_type": download_type,
         "published_at": published_at,
+        "changelog": normalize_changelog(manifest.get("changelog"), metadata_url),
     }
+    discord_source = manifest.get("discord_source")
+    if isinstance(discord_source, dict):
+        keys = ("guild_id", "thread_id", "message_id")
+        if all(str(discord_source.get(key, "")).isdecimal() for key in keys):
+            current_release["source_url"] = "https://discord.com/channels/" + "/".join(str(discord_source[key]) for key in keys)
 
     if download_type == "direct":
         name = download.get("name")
@@ -851,8 +866,33 @@ def load_url_mod(
         metadata_url,
         source,
     )
+    return catalog_mod, current_release
+
+
+def load_url_mod(registration, source, previous_mod):
+    metadata_url = require_https(require_text(registration, "metadata_url", source), "metadata_url", source)
+    max_releases = registration.get("max_releases", 20)
+    if isinstance(max_releases, bool) or not isinstance(max_releases, int) or not 1 <= max_releases <= 100:
+        raise ValueError(f"{source}: max_releases must be between 1 and 100")
+    history = registration.get("metadata_urls", [])
+    if not isinstance(history, list) or len(history) > 100 or any(not isinstance(url, str) for url in history):
+        raise ValueError(f"{source}: metadata_urls must be a list of up to 100 HTTPS URLs")
+    history = list(dict.fromkeys(require_https(url, "metadata_urls", source) for url in history))
+    catalog_mod, current_release = load_url_release(registration, source, metadata_url)
+    version = current_release["version"]
 
     releases = [current_release]
+    seen_versions = {version}
+    for url in history:
+        if url == metadata_url or len(releases) >= max_releases:
+            continue
+        try:
+            _, release = load_url_release(registration, source, url)
+            if release["version"] not in seen_versions:
+                releases.append(release)
+                seen_versions.add(release["version"])
+        except Exception as error:
+            print(f"Warning: {source}: could not load historical metadata {url}: {error}")
 
     if isinstance(previous_mod, dict):
         previous_releases = previous_mod.get("releases")
@@ -860,9 +900,10 @@ def load_url_mod(
             for release in previous_releases:
                 if not isinstance(release, dict):
                     continue
-                if release.get("version") == version:
+                if release.get("version") in seen_versions:
                     continue
                 releases.append(release)
+                seen_versions.add(release.get("version"))
 
     releases.sort(
         key=lambda release: str(
@@ -875,7 +916,7 @@ def load_url_mod(
     return catalog_mod
 
 
-def load_registration(source, previous_mods):
+def load_registration_data(source, previous_mods):
     data = json.loads(
         source.read_text(encoding="utf-8")
     )
@@ -930,6 +971,21 @@ def load_registration(source, previous_mods):
             "keeping previous published entry"
         )
         return previous
+
+
+def load_registration(source, previous_mods):
+    mod = load_registration_data(source, previous_mods)
+    if mod is None:
+        return None
+    previous = previous_mods.get(mod["id"], {})
+    names = previous.get("legacy_names", []) if isinstance(previous, dict) else []
+    if not isinstance(names, list):
+        names = []
+    previous_name = previous.get("name") if isinstance(previous, dict) else None
+    if isinstance(previous_name, str) and previous_name:
+        names = [previous_name, *names]
+    mod["legacy_names"] = list(dict.fromkeys(name for name in names if isinstance(name, str) and name and len(name) <= 160))[:32]
+    return mod
 
 
 def main():

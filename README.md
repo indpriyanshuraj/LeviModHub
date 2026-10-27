@@ -4,6 +4,10 @@ LeviModHub is the external mod catalog used by LeviLauncher on Android.
 
 Mods can still use the old manual catalog format. Mods can also use automatic updates through GitHub Releases or through a stable `levimod.json` URL.
 
+Discord developers can publish releases and updates using `[LeviMod]` messages in the forum posts they created. See [Discord publishing](docs/discord-publishing.md) for ownership rules, the release format, optional update fields and attachment mirroring.
+
+The catalog supports `summary` for the mod card, `description` for the full explanation, and a `changelog` on each release. Add `info.summary` and top-level `changelog` to release manifests to use these fields. Existing manifests remain compatible; a card summary is derived from their description. URL registrations may retain immutable snapshots in `metadata_urls` so closely spaced updates preserve release history.
+
 ## GitHub Releases
 
 For mods that publish files through GitHub Releases, add a `levimod.json` file to the root of the mod repository.

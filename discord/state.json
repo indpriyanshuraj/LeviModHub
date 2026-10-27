@@ -1,0 +1,18 @@
+{
+  "cutoff": "2026-10-14T13:50:40.310651Z",
+  "forum_id": "1429386988930203729",
+  "guild_id": "1124235469245382698",
+  "mods": {
+    "test": {
+      "message_id": "1560001595402489956",
+      "metadata_url": "https://github.com/QYCottage/LeviModHub/releases/download/discord-test-1560001595402489956/levimod.json",
+      "owner_id": "793747371199823873",
+      "release_tag": "discord-test-1560001595402489956",
+      "thread_id": "1559927727014813837",
+      "updated_at": "2026-10-14T18:50:17.778882Z",
+      "url_schema": 2,
+      "version": "1.1.0"
+    }
+  },
+  "schema_version": 1
+}
